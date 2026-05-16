@@ -1,7 +1,8 @@
-torch
-transformers
-accelerate
-bitsandbytes
+torch>=2.0.0
+transformers>=4.40.0
+accelerate>=0.20.0
+bitsandbytes>=0.40.0
 evaluate
 sacrebleu
-unbabel-comet
+unbabel-comet>=2.2.0
+pandas
