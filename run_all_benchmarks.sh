@@ -1,11 +1,15 @@
 # Run this script to execute all the recommended models for the WMT26 Unconstrained/Constrained task within Colab's 16GB VRAM limit
 # Use: !bash run_all_benchmarks.sh
 
-# 1. Constrained Track Model (Gemma 3 12B)
-# Note: Since it's a 12B model, it CANNOT run in fp16 on a 16GB T4 GPU. We MUST use int8 or int4!
-echo "Running Constrained Track Model (Gemma 3 12B)..."
-python benchmark.py --model_id google/gemma-3-12b --precision int8
-python benchmark.py --model_id google/gemma-3-12b --precision int4
+# Note: Some models listed here require you to accept their license on HuggingFace!
+# - Llama 3.1: https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct
+# - Cohere Command R: https://huggingface.co/CohereForAI/c4ai-command-r-v01
+# - Qwen 2.5: https://huggingface.co/Qwen/Qwen2.5-7B
+# - Gemma 3 12B: https://huggingface.co/google/gemma-3-12b (or closest available right now like gemma-2-9b or gemma-7b)
+
+echo "Running Constrained Track Model Proxy (Gemma 7B as placeholder since 12B not released publicly yet)..."
+python benchmark.py --model_id google/gemma-7b --precision int8
+python benchmark.py --model_id google/gemma-7b --precision int4
 
 # 2. Unconstrained Track Models (< 20B parameters)
 echo "Running Llama 3.1 8B..."
