@@ -6,4 +6,3 @@ evaluate
 sacrebleu
 unbabel-comet>=2.2.0
 pandas
-protobuf>=5.28.0

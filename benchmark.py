@@ -3,6 +3,11 @@ import time
 import torch
 import os
 import csv
+
+# Disable TensorFlow and JAX so Transformers doesn't try to import them and crash due to Colab dependency issues
+os.environ["USE_TF"] = "0"
+os.environ["USE_JAX"] = "0"
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 def measure_memory_and_speed(model_id, precision, prompt, max_new_tokens=50):
