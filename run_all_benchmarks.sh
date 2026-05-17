@@ -1,16 +1,5 @@
-# Run this script to execute explicitly open models for the WMT26 Unconstrained task within Colab's 16GB VRAM limit
-# Use: !bash run_all_benchmarks.sh
+# The original unrestricted WMT26 models (Mistral 7B, Qwen 2.5 7B) have already been computed!
+# You do not need to run this script anymore to save on Colab GPU compute.
+# Please run 'run_gated_benchmarks.sh' instead to get the remaining WMT26 models!
 
-# ONLY OPEN WEIGHTS INCLUDED HERE (No Hugging Face token required)
-
-echo "Running Mistral 7B..."
-python benchmark.py --model_id mistralai/Mistral-7B-v0.1 --precision fp16
-python benchmark.py --model_id mistralai/Mistral-7B-v0.1 --precision int8
-python benchmark.py --model_id mistralai/Mistral-7B-v0.1 --precision int4
-
-echo "Running Qwen 2.5 7B..."
-python benchmark.py --model_id Qwen/Qwen2.5-7B --precision fp16
-python benchmark.py --model_id Qwen/Qwen2.5-7B --precision int8
-python benchmark.py --model_id Qwen/Qwen2.5-7B --precision int4
-
-echo "Done! All results are saved in benchmark_results.csv."
+echo "Already computed! See benchmark_results.csv."
