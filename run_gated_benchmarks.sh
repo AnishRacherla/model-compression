@@ -2,10 +2,6 @@
 # This script contains ONLY the models that haven't been computed yet
 # tailored specifically to fit in 16GB Colab VRAM without crashing.
 
-echo "Running Cohere Command R 7B..."
-python benchmark.py --model_id CohereForAI/c4ai-command-r-v01 --precision int8
-python benchmark.py --model_id CohereForAI/c4ai-command-r-v01 --precision int4
-
 echo "Running Constrained Track Gemma 3 12B..."
 python benchmark.py --model_id google/gemma-3-12b --precision int8
 python benchmark.py --model_id google/gemma-3-12b --precision int4
