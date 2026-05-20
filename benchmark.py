@@ -86,18 +86,18 @@ def measure_memory_and_speed(model_id, precision, prompt, max_new_tokens=50):
             from datasets import load_dataset
             import evaluate
             
-            # Load a small slice of FLORES dev set (eng_Latn -> deu_Latn)
-            print(f"Loading {args.eval_samples} samples from facebook/flores (eng_Latn -> deu_Latn)...")
-            dataset = load_dataset('facebook/flores', 'eng_Latn-deu_Latn', split='dev', trust_remote_code=True)
+            # Load a small slice of FLORES dev set (eng_Latn -> zho_Hans)
+            print(f"Loading {args.eval_samples} samples from facebook/flores (eng_Latn -> zho_Hans)...")
+            dataset = load_dataset('facebook/flores', 'eng_Latn-zho_Hans', split='dev', trust_remote_code=True)
             dataset = dataset.select(range(min(args.eval_samples, len(dataset))))
             
             sources = dataset['sentence_eng_Latn']
-            references = dataset['sentence_deu_Latn']
+            references = dataset['sentence_zho_Hans']
             predictions = []
             
             for i, src_text in enumerate(sources):
                 # Standard zero-shot translation prompt
-                prompt_eval = f"Translate the following English text to German:\n{src_text}\nTranslation:"
+                prompt_eval = f"Translate the following English text to Simplified Chinese:\n{src_text}\nTranslation:"
                 inputs_eval = tokenizer(prompt_eval, return_tensors="pt").to(model.device)
                 with torch.no_grad():
                     # Generate with enough tokens for the translation
@@ -127,7 +127,7 @@ def measure_memory_and_speed(model_id, precision, prompt, max_new_tokens=50):
     with open(csv_file, mode='a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["Model", "Precision", "Load Time (s)", "Model Size (MB)", "Peak VRAM (MB)", "Inference Time (s)", "Tokens/s", "COMET (eng->deu)"])
+            writer.writerow(["Model", "Precision", "Load Time (s)", "Model Size (MB)", "Peak VRAM (MB)", "Inference Time (s)", "Tokens/s", "COMET (eng->zho)"])
         writer.writerow([model_id, precision, round(load_time, 2), round(model_size, 2), round(peak_mem, 2), round(infer_time, 2), round(tokens_per_sec, 2), comet_score_val])
     print(f"Results appended to {csv_file}")
     
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, default="google/gemma-2b")
     parser.add_argument("--precision", type=str, choices=["fp32", "fp16", "bf16", "fp8", "int8", "int4"], default="fp16")
-    parser.add_argument("--prompt", type=str, default="Translate the following English text to German: 'The quick brown fox jumps over the lazy dog.' Translation:")
+    parser.add_argument("--prompt", type=str, default="Translate the following English text to Simplified Chinese: 'The quick brown fox jumps over the lazy dog.' Translation:")
     parser.add_argument("--eval_comet", action="store_true", help="Run translation evaluation using FLORES-200 and COMET metric.")
     parser.add_argument("--eval_samples", type=int, default=20, help="Number of sentences to translate for COMET evaluation (default: 20 to avoid extreme Colab timeouts).")
     args = parser.parse_args()
