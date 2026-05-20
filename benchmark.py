@@ -88,7 +88,16 @@ def measure_memory_and_speed(model_id, precision, prompt, max_new_tokens=50):
             
             # Load a small slice of FLORES dev set (eng_Latn -> zho_Hans)
             print(f"Loading {args.eval_samples} samples from facebook/flores (eng_Latn -> zho_Hans)...")
-            dataset = load_dataset('facebook/flores', 'eng_Latn-zho_Hans', split='dev', trust_remote_code=True)
+            try:
+                # First try the standard way without script execution (for newer huggingface datasets package)
+                dataset = load_dataset('facebook/flores', 'eng_Latn-zho_Hans', split='dev', trust_remote_code=True)
+            except Exception as e:
+                if "Dataset scripts are no longer supported" in str(e) or "trust_remote_code" in str(e):
+                    # Fallback to the direct viewer format via the newer Hub protocol if the custom loading script blocked it
+                    dataset = load_dataset("facebook/flores", "eng_Latn-zho_Hans", split='dev')
+                else:
+                    raise e
+
             dataset = dataset.select(range(min(args.eval_samples, len(dataset))))
             
             sources = dataset['sentence_eng_Latn']
