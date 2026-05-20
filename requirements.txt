@@ -3,6 +3,7 @@ transformers>=4.40.0
 accelerate>=0.20.0
 bitsandbytes>=0.40.0
 evaluate
+datasets<3.0.0
 sacrebleu
 unbabel-comet>=2.2.0
 pandas
