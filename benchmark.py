@@ -48,61 +48,66 @@ def measure_memory_and_speed(model_id, precision, prompt, max_new_tokens=50):
     # Measure Size
     model_size = sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 ** 2)
     
-    # Measure Inference Speed
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    
-    start_infer = time.time()
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
-    infer_time = time.time() - start_infer
-    
-    # Calculate decoded tokens speed
-    num_generated_tokens = outputs.shape[1] - inputs.input_ids.shape[1]
-    tokens_per_sec = num_generated_tokens / infer_time
-    
-    # Memory
+    # Initialize hardware variables
     peak_mem = 0
-    if torch.cuda.is_available():
-        peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
-        mem_label = "Peak VRAM Usage"
+    infer_time = 0.0
+    tokens_per_sec = 0.0
+    mem_label = "GPU Memory (N/A on CPU)"
+    
+    if not args.skip_benchmark:
+        # Measure Inference Speed
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        
+        start_infer = time.time()
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
+        infer_time = time.time() - start_infer
+        
+        # Calculate decoded tokens speed
+        num_generated_tokens = outputs.shape[1] - inputs.input_ids.shape[1]
+        tokens_per_sec = num_generated_tokens / infer_time
+        
+        # Memory
+        if torch.cuda.is_available():
+            peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            mem_label = "Peak VRAM Usage"
+        
+        print("-" * 40)
+        print(f"Results for {model_id} ({precision}):")
+        print(f"Load Time: {load_time:.2f} s")
+        print(f"Estimated Model Size (Weights): {model_size:.2f} MB")
+        print(f"{mem_label}: {peak_mem:.2f} MB")
+        print(f"Inference Time: {infer_time:.2f} s")
+        print(f"Generation Speed: {tokens_per_sec:.2f} tokens/s")
     else:
-        # Just give a rough estimate of system memory without psutil to avoid extra dependencies
-        mem_label = "GPU Memory (N/A on CPU)"
+        print("Skipping hardware benchmarking as requested by --skip_benchmark...")
     
-    print("-" * 40)
-    print(f"Results for {model_id} ({precision}):")
-    print(f"Load Time: {load_time:.2f} s")
-    print(f"Estimated Model Size (Weights): {model_size:.2f} MB")
-    print(f"{mem_label}: {peak_mem:.2f} MB")
-    print(f"Inference Time: {infer_time:.2f} s")
-    print(f"Generation Speed: {tokens_per_sec:.2f} tokens/s")
-    
-    # Optional FLORES-200 / COMET Evaluation
+    # Optional Translation / COMET Evaluation
     comet_score_val = "N/A"
     if args.eval_comet:
         print("-" * 40)
-        print("Starting FLORES-200 translation and COMET evaluation...")
+        print("Starting translation and COMET evaluation...")
         try:
-            from datasets import load_dataset
             import evaluate
+            import urllib.request
+            import json
             
-            # Load a small slice of FLORES dev set (eng_Latn -> zho_Hans)
-            print(f"Loading {args.eval_samples} samples from facebook/flores (eng_Latn -> zho_Hans)...")
-            try:
-                # First try the standard way without script execution (for newer huggingface datasets package)
-                dataset = load_dataset('facebook/flores', 'eng_Latn-zho_Hans', split='dev', trust_remote_code=True)
-            except Exception as e:
-                if "Dataset scripts are no longer supported" in str(e) or "trust_remote_code" in str(e):
-                    # Fallback to the direct viewer format via the newer Hub protocol if the custom loading script blocked it
-                    dataset = load_dataset("facebook/flores", "eng_Latn-zho_Hans", split='dev')
-                else:
-                    raise e
-
-            dataset = dataset.select(range(min(args.eval_samples, len(dataset))))
+            # Use Helsinki-NLP/opus-100 via the HuggingFace datasets server REST API 
+            # to bypass completely the broken 'facebook/flores' source and windows/dill bugs in the datasets library.
+            print(f"Loading {args.eval_samples} samples from Helsinki-NLP/opus-100 (en-zh)...")
+            url = f"https://datasets-server.huggingface.co/rows?dataset=Helsinki-NLP/opus-100&config=en-zh&split=train&offset=0&length={args.eval_samples}"
             
-            sources = dataset['sentence_eng_Latn']
-            references = dataset['sentence_zho_Hans']
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            response = urllib.request.urlopen(req)
+            data = json.loads(response.read().decode('utf-8'))
+            
+            sources = []
+            references = []
             predictions = []
+            
+            for row in data['rows']:
+                sources.append(row['row']['translation']['en'])
+                references.append(row['row']['translation']['zh'])
             
             for i, src_text in enumerate(sources):
                 # Standard zero-shot translation prompt
@@ -115,7 +120,7 @@ def measure_memory_and_speed(model_id, precision, prompt, max_new_tokens=50):
                 pred = tokenizer.decode(outputs_eval[0][-num_gen:], skip_special_tokens=True).strip()
                 predictions.append(pred)
                 
-                if (i + 1) % 5 == 0:
+                if (i + 1) % 5 == 0 or (i + 1) == len(sources):
                     print(f"Translated {i + 1}/{len(sources)} sentences...")
                     
             print("Calculating COMET score. This requires downloading the COMET model if not cached...")
@@ -147,8 +152,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_id", type=str, default="google/gemma-2b")
     parser.add_argument("--precision", type=str, choices=["fp32", "fp16", "bf16", "fp8", "int8", "int4"], default="fp16")
     parser.add_argument("--prompt", type=str, default="Translate the following English text to Simplified Chinese: 'The quick brown fox jumps over the lazy dog.' Translation:")
-    parser.add_argument("--eval_comet", action="store_true", help="Run translation evaluation using FLORES-200 and COMET metric.")
-    parser.add_argument("--eval_samples", type=int, default=20, help="Number of sentences to translate for COMET evaluation (default: 20 to avoid extreme Colab timeouts).")
+    parser.add_argument("--skip_benchmark", action="store_true", help="Skip the initial hardware inference speed test and go straight to COMET evaluation.")
+    parser.add_argument("--eval_comet", action="store_true", help="Run translation evaluation using COMET metric (uses Helsinki-NLP/opus-100 API to bypass bugs).")
+    parser.add_argument("--eval_samples", type=int, default=20, help="Number of sentences to translate for COMET evaluation (default: 20 to avoid extreme timeouts).")
     args = parser.parse_args()
     
     measure_memory_and_speed(args.model_id, args.precision, args.prompt)
