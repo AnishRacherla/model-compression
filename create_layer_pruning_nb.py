@@ -1,0 +1,574 @@
+import json
+
+cells = []
+
+# ── CELL 0: Title ────────────────────────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": [
+  "# Layer Sensitivity Pruning of Aya Expanse 8B\n",
+  "\n",
+  "This notebook identifies and completely removes the least important Transformer layers based on the drop in COMET translation scores when a layer is bypassed.\n",
+  "\n",
+  "> ⚠️ **IMPORTANT – Read Before Running**\n",
+  ">\n",
+  "> **Step 1:** Run **Cell 1 (pip install)** only.\n",
+  "> **Step 2:** Run **Cell 2 (restart kernel)**. The cell will intentionally crash/restart the kernel.\n",
+  "> **Step 3:** Run all remaining cells from **Cell 3 onward** in order.\n",
+  ">\n",
+  "> This two-step process is required because numpy C-binary extensions cannot be hot-swapped in a live kernel."
+ ]
+})
+
+# ── CELL 1: pip install ──────────────────────────────────────────────────────
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "import subprocess, sys\n",
+  "pkgs = [\n",
+  "    'numpy<2.0',\n",
+  "    'pyarrow',\n",
+  "    'pandas',\n",
+  "    'transformers',\n",
+  "    'datasets',\n",
+  "    'evaluate',\n",
+  "    'accelerate',\n",
+  "    'bitsandbytes',\n",
+  "    'sacrebleu',\n",
+  "    'huggingface_hub',\n",
+  "]\n",
+  "subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '--upgrade'] + pkgs)\n",
+  "print('\\n✅ Packages installed. Now run Cell 2 to restart the kernel.')"
+ ]
+})
+
+# ── CELL 2: Kernel restart ───────────────────────────────────────────────────
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "import os, signal\n",
+  "print('Restarting kernel to load the new numpy binary...')\n",
+  "os.kill(os.getpid(), signal.SIGKILL)"
+ ]
+})
+
+# ── CELL 3: Hugging Face login ───────────────────────────────────────────────
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "from huggingface_hub import login\n",
+  "\n",
+  "# The READ token is required globally to download the gated Aya Expanse model\n",
+  "read_token = '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'\n",
+  "login(token=read_token)\n",
+  "HF_REPO_ID = 'AnishRacherla/arya_layer_prune'\n",
+  "print('✅ Logged in to Hugging Face with READ token. Cloud checkpointing enabled to:', HF_REPO_ID)"
+ ]
+})
+
+# ── CELL 4: Imports & workspace setup ────────────────────────────────────────
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "import os, gc, json, time\n",
+  "import torch\n",
+  "import torch.nn as nn\n",
+  "from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig\n",
+  "from tqdm.auto import tqdm\n",
+  "\n",
+  "output_dir = '/kaggle/working/pruned_aya'\n",
+  "os.makedirs(output_dir, exist_ok=True)\n",
+  "print(f'✅ Workspace ready → {output_dir}')"
+ ]
+})
+
+# ── CELL 5: Download FLORES-200 ──────────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 1. Prepare Evaluation Dataset\n",
+            "We download FLORES-200 and create two subsets:\n",
+            "- **50 examples** for layer sensitivity analysis.\n",
+            "- **100 examples** for the progressive layer removal experiments."]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "import tarfile, urllib.request, tempfile\n",
+  "\n",
+  "print('Downloading FLORES-200 from Meta CDN...')\n",
+  "with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:\n",
+  "    urllib.request.urlretrieve('https://dl.fbaipublicfiles.com/nllb/flores200_dataset.tar.gz', tmp.name)\n",
+  "    with tarfile.open(tmp.name, 'r:gz') as tar:\n",
+  "        eng = tar.extractfile('./flores200_dataset/dev/eng_Latn.dev')\n",
+  "        zho = tar.extractfile('./flores200_dataset/dev/zho_Hans.dev')\n",
+  "        sources    = [l.decode().strip() for l in eng.readlines()]\n",
+  "        references = [l.decode().strip() for l in zho.readlines()]\n",
+  "os.remove(tmp.name)\n",
+  "\n",
+  "step2_data = [{'src': s, 'ref': r} for s, r in zip(sources[:50], references[:50])]\n",
+  "step4_data = [{'src': s, 'ref': r} for s, r in zip(sources[50:150], references[50:150])]\n",
+  "print(f'✅ Loaded {len(step2_data)} pairs for Step 2 and {len(step4_data)} pairs for Step 4.')"
+ ]
+})
+
+# ── CELL 6: Model loading ────────────────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 2. Load Model\n",
+            "Load Aya Expanse 8B in 4-bit NF4 to save memory."]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "model_id = 'CohereForAI/aya-expanse-8b'\n",
+  "print('Loading tokenizer...')\n",
+  "tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)\n",
+  "if not tokenizer.pad_token:\n",
+  "    tokenizer.pad_token = tokenizer.eos_token\n",
+  "tokenizer.padding_side = 'left' # Left padding is required for batched generation\n",
+  "\n",
+  "bnb_config = BitsAndBytesConfig(\n",
+  "    load_in_4bit=True,\n",
+  "    bnb_4bit_use_double_quant=True,\n",
+  "    bnb_4bit_quant_type='nf4',\n",
+  "    bnb_4bit_compute_dtype=torch.float16,\n",
+  ")\n",
+  "\n",
+  "print('Loading model...')\n",
+  "model = AutoModelForCausalLM.from_pretrained(\n",
+  "    model_id, quantization_config=bnb_config,\n",
+  "    device_map='auto', trust_remote_code=True, torch_dtype=torch.float16,\n",
+  "    attn_implementation='eager',  # Use eager (not SDPA) to avoid contiguous-mask errors during bypass\n",
+  ")\n",
+  "model.eval()\n",
+  "print('✅ Model loaded successfully.')"
+ ]
+})
+
+# ── CELL 7: Step 2 Translations ──────────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 3. Step 2: Layer Sensitivity Analysis (Translations)\n",
+            "We temporarily disable each layer one by one and generate translations. To safely bypass a layer without breaking Hugging Face's KV-cache generation, we temporarily remove it from `model.model.layers`."]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "import contextlib\n",
+  "\n",
+  "@contextlib.contextmanager\n",
+  "def bypass_layer(model, layer_idx):\n",
+  "    '''\n",
+  "    Bypass a single decoder layer via a pass-through identity.\n",
+  "    \n",
+  "    WHY PATCH _old_forward, NOT .forward?\n",
+  "    When device_map='auto' is used, Accelerate wraps every module's .forward in\n",
+  "    its own hook function and saves the REAL forward as module._old_forward.\n",
+  "    The hook then calls module._old_forward() directly, bypassing module.forward\n",
+  "    entirely. Patching module.forward is silently ignored by Accelerate.\n",
+  "    We must patch _old_forward to actually skip the computation.\n",
+  "    '''\n",
+  "    layer = model.model.layers[layer_idx]\n",
+  "\n",
+  "    def identity_forward(hidden_states, **kwargs):\n",
+  "        # Pass hidden_states through, forcing a contiguous clone so the next\n",
+  "        # real layer receives a properly laid-out tensor in memory.\n",
+  "        return hidden_states.contiguous().clone()\n",
+  "\n",
+  "    # Check if Accelerate hooks are installed (device_map='auto' adds them)\n",
+  "    use_old = hasattr(layer, '_old_forward')\n",
+  "    if use_old:\n",
+  "        original = layer._old_forward\n",
+  "        layer._old_forward = identity_forward\n",
+  "    else:\n",
+  "        original = layer.forward\n",
+  "        layer.forward = identity_forward\n",
+  "    try:\n",
+  "        yield\n",
+  "    finally:\n",
+  "        if use_old:\n",
+  "            layer._old_forward = original\n",
+  "        else:\n",
+  "            layer.forward = original\n",
+  "\n",
+  "def generate_translations(model, tokenizer, data, batch_size=8, use_cache=True):\n",
+  "    preds = []\n",
+  "    prompts = [f\"Translate from English to Simplified Chinese:\\nen: {d['src']}\\nzh:\" for d in data]\n",
+  "    for i in range(0, len(prompts), batch_size):\n",
+  "        batch_prompts = prompts[i:i+batch_size]\n",
+  "        enc = tokenizer(batch_prompts, return_tensors='pt', padding=True).to(model.device)\n",
+  "        with torch.no_grad():\n",
+  "            out = model.generate(\n",
+  "                **enc, max_new_tokens=100, do_sample=False,\n",
+  "                pad_token_id=tokenizer.eos_token_id,\n",
+  "                use_cache=use_cache,  # False disables KV-cache, avoids slot-index errors during bypass\n",
+  "            )\n",
+  "        for j, o in enumerate(out):\n",
+  "            n_new = o.shape[0] - enc.input_ids[j].shape[0]\n",
+  "            pred = tokenizer.decode(o[-n_new:], skip_special_tokens=True).strip().replace('\\n', ' ')\n",
+  "            preds.append(pred)\n",
+  "    return preds\n",
+  "\n",
+  "import os, json\n",
+  "from huggingface_hub import HfApi, hf_hub_download\n",
+  "\n",
+  "checkpoint_file = 'step2_preds.json'\n",
+  "all_results = {}\n",
+  "\n",
+  "# The WRITE token is used explicitly for pushing/pulling our cloud checkpoints\n",
+  "write_token = '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'\n",
+  "api = HfApi(token=write_token)\n",
+  "\n",
+  "# 0. Attempt to download existing checkpoint from Hugging Face Hub (Cloud Resume)\n",
+  "try:\n",
+  "    print(f'Attempting to download cloud checkpoint from {HF_REPO_ID}...')\n",
+  "    downloaded_path = hf_hub_download(repo_id=HF_REPO_ID, filename=checkpoint_file, repo_type='model', token=write_token)\n",
+  "    with open(downloaded_path, 'r', encoding='utf-8') as f:\n",
+  "        all_results = json.load(f).get('preds', {})\n",
+  "    # Also copy it to local workspace\n",
+  "    with open(checkpoint_file, 'w', encoding='utf-8') as f:\n",
+  "        json.dump({'data': step2_data, 'preds': all_results}, f)\n",
+  "    print(f'✅ Successfully loaded {len(all_results)} checkpoint(s) from cloud.')\n",
+  "except Exception as e:\n",
+  "    print(f'No cloud checkpoint found or error downloading: {e}. Starting fresh.')\n",
+  "\n",
+  "if os.path.exists(checkpoint_file) and not all_results:\n",
+  "    print(f'Loading local checkpoints from {checkpoint_file}...')\n",
+  "    with open(checkpoint_file, 'r', encoding='utf-8') as f:\n",
+  "        all_results = json.load(f).get('preds', {})\n",
+  "\n",
+  "# 1. Baseline translation (with KV cache for speed)\n",
+  "if 'baseline' not in all_results:\n",
+  "    print('Generating Baseline Translations...')\n",
+  "    all_results['baseline'] = generate_translations(model, tokenizer, step2_data)\n",
+  "    with open(checkpoint_file, 'w', encoding='utf-8') as f:\n",
+  "        json.dump({'data': step2_data, 'preds': all_results}, f)\n",
+  "    # Upload baseline to Hub\n",
+  "    api.upload_file(path_or_fileobj=checkpoint_file, path_in_repo=checkpoint_file, repo_id=HF_REPO_ID, repo_type='model')\n",
+  "else:\n",
+  "    print('Baseline already generated.')\n",
+  "\n",
+  "# 2. Loop through all 32 layers; use_cache=False avoids KV-cache slot issues during bypass\n",
+  "num_layers = len(model.model.layers)\n",
+  "for layer_idx in tqdm(range(num_layers), desc='Dropping layers'):\n",
+  "    # Check if we already have this layer (resume capability)\n",
+  "    if f'layer_{layer_idx}' in all_results:\n",
+  "        print(f'Skipping layer_{layer_idx}, already generated.')\n",
+  "        continue\n",
+  "\n",
+  "    with bypass_layer(model, layer_idx):\n",
+  "        preds = generate_translations(model, tokenizer, step2_data, use_cache=False)\n",
+  "        all_results[f'layer_{layer_idx}'] = preds\n",
+  "\n",
+  "    # Checkpoint after every layer locally\n",
+  "    with open(checkpoint_file, 'w', encoding='utf-8') as f:\n",
+  "        json.dump({'data': step2_data, 'preds': all_results}, f)\n",
+  "    \n",
+  "    # Upload checkpoint to Hugging Face Hub\n",
+  "    try:\n",
+  "        api.upload_file(\n",
+  "            path_or_fileobj=checkpoint_file, \n",
+  "            path_in_repo=checkpoint_file, \n",
+  "            repo_id=HF_REPO_ID, \n",
+  "            repo_type='model'\n",
+  "        )\n",
+  "        print(f'\\n✅ Cloud checkpoint saved for layer_{layer_idx} to {HF_REPO_ID}')\n",
+  "    except Exception as e:\n",
+  "        print(f'\\n⚠️ Failed to upload cloud checkpoint for layer_{layer_idx}: {e}')\n",
+  "\n",
+  "print('✅ Translations complete. Checkpoints safely stored in cloud.')"
+ ]
+})
+
+# ── CELL 8: Install COMET ────────────────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 4. Install COMET dependencies\n",
+            "COMET requires an older version of transformers. We install it now and run isolated scoring scripts to prevent dependency crashes."]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "!pip install -q unbabel-comet pytorch-lightning \"transformers<4.45\""
+ ]
+})
+
+# ── CELL 9: Step 2 & 3 COMET Scoring ─────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 5. Step 2 & 3: COMET Scoring & Layer Ranking\n",
+            "This isolated script computes COMET for all 32 experiments, calculates the drop relative to the baseline, and ranks the layers from least sensitive to most sensitive."]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "scoring_script = '''\n",
+  "import json, logging, pandas as pd\n",
+  "logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)\n",
+  "from comet import download_model, load_from_checkpoint\n",
+  "\n",
+  "with open('step2_preds.json', encoding='utf-8') as f:\n",
+  "    eval_data = json.load(f)\n",
+  "data = eval_data['data']\n",
+  "preds = eval_data['preds']\n",
+  "\n",
+  "print('Loading COMET model...')\n",
+  "comet_model = load_from_checkpoint(download_model('Unbabel/wmt22-comet-da'))\n",
+  "\n",
+  "def score_set(predictions):\n",
+  "    comet_input = [{'src': d['src'], 'mt': p, 'ref': d['ref']} for d, p in zip(data, predictions)]\n",
+  "    res = comet_model.predict(comet_input, batch_size=8, gpus=1)\n",
+  "    return res.system_score\n",
+  "\n",
+  "print('Scoring baseline...')\n",
+  "baseline_score = score_set(preds['baseline'])\n",
+  "print(f'Baseline COMET: {baseline_score:.4f}')\n",
+  "\n",
+  "results = []\n",
+  "for i in range(32):\n",
+  "    print(f'Scoring drop-layer-{i}...', end='\\r')\n",
+  "    score = score_set(preds[f'layer_{i}'])\n",
+  "    drop = baseline_score - score\n",
+  "    results.append({'Layer': i, 'COMET': score, 'Drop': drop})\n",
+  "\n",
+  "df = pd.DataFrame(results).sort_values('Drop', ascending=True)\n",
+  "df.to_csv('ranked_layers.csv', index=False)\n",
+  "print('\\n\\n=== Ranked Layer Sensitivity ===')\n",
+  "print(df.to_string(index=False))\n",
+  "'''\n",
+  "\n",
+  "with open('run_step3_scoring.py', 'w') as f:\n",
+  "    f.write(scoring_script)\n",
+  "\n",
+  "!python run_step3_scoring.py"
+ ]
+})
+
+# ── CELL 10: Step 4 Progressive Layer Removal Translations ───────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 6. Step 4: Progressive Layer Removal\n",
+            "We select the least sensitive layers and evaluate compressed models."]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "import pandas as pd\n",
+  "import contextlib\n",
+  "\n",
+  "df = pd.read_csv('ranked_layers.csv')\n",
+  "least_sensitive = df['Layer'].tolist()\n",
+  "\n",
+  "experiments = {\n",
+  "    'A': least_sensitive[:1], # Drop 1\n",
+  "    'B': least_sensitive[:2], # Drop 2\n",
+  "    'C': least_sensitive[:4], # Drop 4\n",
+  "    'D': least_sensitive[:6], # Drop 6\n",
+  "}\n",
+  "\n",
+  "@contextlib.contextmanager\n",
+  "def bypass_multiple_layers(model, drop_indices):\n",
+  "    # Same _old_forward patching strategy as bypass_layer.\n",
+  "    originals = {}\n",
+  "    use_old_map = {}\n",
+  "    for idx in drop_indices:\n",
+  "        layer = model.model.layers[idx]\n",
+  "        use_old = hasattr(layer, '_old_forward')\n",
+  "        use_old_map[idx] = use_old\n",
+  "        def make_identity():\n",
+  "            def identity_forward(hidden_states, **kwargs):\n",
+  "                return hidden_states\n",
+  "            return identity_forward\n",
+  "        if use_old:\n",
+  "            originals[idx] = layer._old_forward\n",
+  "            layer._old_forward = make_identity()\n",
+  "        else:\n",
+  "            originals[idx] = layer.forward\n",
+  "            layer.forward = make_identity()\n",
+  "    try:\n",
+  "        yield\n",
+  "    finally:\n",
+  "        for idx, orig in originals.items():\n",
+  "            if use_old_map[idx]:\n",
+  "                model.model.layers[idx]._old_forward = orig\n",
+  "            else:\n",
+  "                model.model.layers[idx].forward = orig\n",
+  "\n",
+  "experiment_results = {'baseline': {}}\n",
+  "\n",
+  "# Baseline Latency\n",
+  "start = time.time()\n",
+  "preds = generate_translations(model, tokenizer, step4_data, batch_size=8)\n",
+  "experiment_results['baseline']['preds'] = preds\n",
+  "experiment_results['baseline']['latency'] = time.time() - start\n",
+  "\n",
+  "for exp_name, drop_indices in experiments.items():\n",
+  "    print(f'\\nExperiment {exp_name}: Dropping {len(drop_indices)} layers {drop_indices}')\n",
+  "    with bypass_multiple_layers(model, drop_indices):\n",
+  "        start = time.time()\n",
+  "        preds = generate_translations(model, tokenizer, step4_data, batch_size=8)\n",
+  "        latency = time.time() - start\n",
+  "        experiment_results[exp_name] = {'preds': preds, 'latency': latency}\n",
+  "\n",
+  "with open('step4_preds.json', 'w', encoding='utf-8') as f:\n",
+  "    json.dump({'data': step4_data, 'experiments': experiment_results}, f)\n",
+  "print('✅ Experiment translations complete.')"
+ ]
+})
+
+# ── CELL 11: Step 4 Scoring ──────────────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 7. Evaluate Progressive Removal"]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "eval_script = '''\n",
+  "import json, logging, pandas as pd, evaluate\n",
+  "logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)\n",
+  "from comet import download_model, load_from_checkpoint\n",
+  "\n",
+  "with open('step4_preds.json', encoding='utf-8') as f:\n",
+  "    eval_data = json.load(f)\n",
+  "data = eval_data['data']\n",
+  "experiments = eval_data['experiments']\n",
+  "\n",
+  "comet_model = load_from_checkpoint(download_model('Unbabel/wmt22-comet-da'))\n",
+  "bleu_metric = evaluate.load('sacrebleu')\n",
+  "chrf_metric = evaluate.load('chrf')\n",
+  "\n",
+  "results = []\n",
+  "for exp_name, res in experiments.items():\n",
+  "    preds = res['preds']\n",
+  "    refs = [[d['ref']] for d in data]\n",
+  "    \n",
+  "    comet_input = [{'src': d['src'], 'mt': p, 'ref': d['ref']} for d, p in zip(data, preds)]\n",
+  "    comet_score = comet_model.predict(comet_input, batch_size=8, gpus=1).system_score\n",
+  "    bleu_score = bleu_metric.compute(predictions=preds, references=refs)['score']\n",
+  "    chrf_score = chrf_metric.compute(predictions=preds, references=refs)['score']\n",
+  "    \n",
+  "    results.append({\n",
+  "        'Experiment': exp_name,\n",
+  "        'COMET': comet_score,\n",
+  "        'BLEU': bleu_score,\n",
+  "        'chrF': chrf_score,\n",
+  "        'Latency (s)': res['latency']\n",
+  "    })\n",
+  "\n",
+  "df = pd.DataFrame(results)\n",
+  "print('\\n\\n=== Progressive Removal Results ===')\n",
+  "print(df.to_string(index=False))\n",
+  "'''\n",
+  "\n",
+  "with open('run_step4_scoring.py', 'w') as f:\n",
+  "    f.write(eval_script)\n",
+  "\n",
+  "!python run_step4_scoring.py"
+ ]
+})
+
+# ── CELL 12: Step 5 Model Export ─────────────────────────────────────────────
+cells.append({
+ "cell_type": "markdown",
+ "metadata": {},
+ "source": ["## 8. Step 5: Model Export\n",
+            "Choose how many layers you ultimately want to drop based on the results above, permanently remove them, and export the model."]
+})
+
+cells.append({
+ "cell_type": "code",
+ "execution_count": None,
+ "metadata": {},
+ "outputs": [],
+ "source": [
+  "# Set the number of layers you want to permanently drop (e.g., 6 for Experiment D)\n",
+  "LAYERS_TO_DROP = 4 \n",
+  "\n",
+  "if LAYERS_TO_DROP > 0:\n",
+  "    df = pd.read_csv('ranked_layers.csv')\n",
+  "    drop_indices = df['Layer'].tolist()[:LAYERS_TO_DROP]\n",
+  "    print(f'Permanently dropping layers: {drop_indices}')\n",
+  "    \n",
+  "    # Permanently delete the layers from the model\n",
+  "    original_layers = model.model.layers\n",
+  "    model.model.layers = nn.ModuleList([l for i, l in enumerate(original_layers) if i not in drop_indices])\n",
+  "    model.config.num_hidden_layers = len(model.model.layers)\n",
+  "\n",
+  "# Strip quantization config so it doesn't crash when loaded back without bitsandbytes\n",
+  "if hasattr(model.config, 'quantization_config'):\n",
+  "    del model.config.quantization_config\n",
+  "\n",
+  "print(f'Saving {model.config.num_hidden_layers}-layer model to {output_dir}...')\n",
+  "model.save_pretrained(output_dir)\n",
+  "tokenizer.save_pretrained(output_dir)\n",
+  "print('✅ Model saved to disk.')\n",
+  "\n",
+  "# === Push to Hugging Face Hub ===\n",
+  "# Uncomment the code below to upload the compressed model directly to the cloud\n",
+  "# HF_REPO_ID = 'your-username/aya-expanse-layer-pruned'\n",
+  "# print(f'Pushing to {HF_REPO_ID}...')\n",
+  "# model.push_to_hub(HF_REPO_ID)\n",
+  "# tokenizer.push_to_hub(HF_REPO_ID)\n",
+  "# print('✅ Push complete!')"
+ ]
+})
+
+notebook = {
+ "cells": cells,
+ "metadata": {"language_info": {"name": "python"}},
+ "nbformat": 4,
+ "nbformat_minor": 5,
+}
+
+with open("C:/Users/Anish/OneDrive/Desktop/modelcompression/model-compression/layer_pruning_wmt.ipynb", "w", encoding="utf-8") as f:
+    json.dump(notebook, f, indent=1)
+print("Layer pruning notebook created successfully.")

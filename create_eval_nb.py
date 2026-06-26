@@ -2,191 +2,173 @@ import json
 
 cells = []
 
-# ── CELL 0: Title ────────────────────────────────────────────────────────────
 cells.append({
  "cell_type": "markdown",
  "metadata": {},
  "source": [
-  "# Fisher Pruned Model Evaluation\n",
-  "This notebook purely downloads your pruned model from the Hugging Face Hub and evaluates its translation capabilities on the FLORES-200 benchmark dataset using COMET, BLEU, and chrF metrics."
+  "# Evaluate Fine-Tuned LoRA Model\n",
+  "\n",
+  "This notebook is isolated purely for Evaluation to avoid Out of Memory (OOM) errors. It pulls your pruned 4-layer base model, attaches the fine-tuned LoRA adapter from your Hugging Face Hub repo, translates 100 sentences from FLORES-200, and calculates the final COMET score."
  ]
 })
 
-# ── CELL 1: Install initial deps ──────────────────────────────────────────────
 cells.append({
  "cell_type": "code",
  "execution_count": None,
  "metadata": {},
  "outputs": [],
  "source": [
-  "# 1. Install evaluation dependencies\n",
-  "!pip install -q -U transformers accelerate evaluate sacrebleu datasets bitsandbytes"
+  "!pip install -q transformers datasets peft accelerate bitsandbytes evaluate unbabel-comet pytorch-lightning \"transformers<4.45\""
  ]
 })
 
-# ── CELL 2: Login to Hugging Face ─────────────────────────────────────────────
 cells.append({
  "cell_type": "code",
  "execution_count": None,
  "metadata": {},
  "outputs": [],
  "source": [
-  "# 2. Login to Hugging Face (Optional, but required if your repo is private)\n",
   "from huggingface_hub import login\n",
-  "from getpass import getpass\n",
   "\n",
-  "hf_token = getpass('Enter your Hugging Face READ token (or press Enter to skip if model is public): ')\n",
-  "if hf_token:\n",
-  "    login(token=hf_token)\n",
-  "    print('✅ Logged in to Hugging Face.')"
+  "read_token = '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'\n",
+  "login(token=read_token)\n",
+  "print(\"✅ Logged in globally with READ token.\")"
  ]
 })
 
-# ── CELL 3: Enter Repo ID ─────────────────────────────────────────────────────
 cells.append({
  "cell_type": "code",
  "execution_count": None,
  "metadata": {},
  "outputs": [],
  "source": [
-  "# 3. Set your repository ID\n",
-  "# Replace this string with the EXACT repository name you pushed to (e.g., 'your-username/aya-expanse-8b-fisher-pruned')\n",
-  "HF_REPO_ID = input(\"Enter your Hugging Face repository ID: \")\n",
-  "print(f\"Target repository: {HF_REPO_ID}\")"
- ]
-})
-
-# ── CELL 4: Load Model ────────────────────────────────────────────────────────
-cells.append({
- "cell_type": "code",
- "execution_count": None,
- "metadata": {},
- "outputs": [],
- "source": [
-  "# 4. Load the pruned model natively in fp16\n",
   "import torch\n",
-  "from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig\n",
+  "from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig\n",
+  "from peft import PeftModel\n",
   "\n",
-  "print('Loading tokenizer...')\n",
-  "tokenizer = AutoTokenizer.from_pretrained(HF_REPO_ID, trust_remote_code=True)\n",
-  "if not tokenizer.pad_token:\n",
-  "    tokenizer.pad_token = tokenizer.eos_token\n",
-  "tokenizer.padding_side = 'right'\n",
+  "base_model_id = \"AnishRacherla/aya-expanse-8b-pruned-4layers\"\n",
+  "lora_repo_id = \"AnishRacherla/aya-expanse-8b-pruned-4layers-finetuned\"\n",
   "\n",
-  "print('Stripping leftover 4-bit quantization config...')\n",
-  "config = AutoConfig.from_pretrained(HF_REPO_ID, trust_remote_code=True)\n",
-  "if hasattr(config, 'quantization_config'):\n",
-  "    del config.quantization_config\n",
-  "    print('Removed old bitsandbytes config.')\n",
+  "print(\"Loading tokenizer...\")\n",
+  "tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)\n",
   "\n",
-  "print('Loading pruned model...')\n",
-  "model = AutoModelForCausalLM.from_pretrained(\n",
-  "    HF_REPO_ID,\n",
-  "    config=config,\n",
-  "    device_map='auto',\n",
-  "    torch_dtype=torch.float16,\n",
+  "bnb_config = BitsAndBytesConfig(\n",
+  "    load_in_4bit=True,\n",
+  "    bnb_4bit_use_double_quant=True,\n",
+  "    bnb_4bit_quant_type=\"nf4\",\n",
+  "    bnb_4bit_compute_dtype=torch.float16,\n",
+  ")\n",
+  "\n",
+  "print(\"Loading base 4-layer pruned model in 4-bit...\")\n",
+  "base_model = AutoModelForCausalLM.from_pretrained(\n",
+  "    base_model_id,\n",
+  "    quantization_config=bnb_config,\n",
+  "    device_map=\"auto\",\n",
   "    trust_remote_code=True,\n",
   ")\n",
+  "\n",
+  "print(f\"Attaching fine-tuned LoRA adapters from {lora_repo_id}...\")\n",
+  "model = PeftModel.from_pretrained(base_model, lora_repo_id)\n",
   "model.eval()\n",
-  "print('✅ Model loaded successfully and ready for inference!')"
+  "print(\"✅ Model successfully loaded and ready for evaluation.\")"
  ]
 })
 
-# ── CELL 5: Download FLORES and Translate ─────────────────────────────────────
 cells.append({
  "cell_type": "code",
  "execution_count": None,
  "metadata": {},
  "outputs": [],
  "source": [
-  "# 5. Download FLORES-200 and generate translations\n",
-  "import tarfile, urllib.request, tempfile, json, os\n",
+  "import tarfile\n",
+  "import urllib.request\n",
+  "import tempfile\n",
+  "import os\n",
+  "import json\n",
   "from tqdm.auto import tqdm\n",
   "\n",
-  "EVAL_SIZE = 100\n",
-  "print('Downloading FLORES-200 from Meta CDN...')\n",
+  "print(\"Downloading FLORES-200 Evaluation Dataset directly from Meta...\")\n",
+  "samples_to_eval = 100\n",
+  "sources = []\n",
+  "references = []\n",
   "\n",
-  "with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:\n",
-  "    urllib.request.urlretrieve(\n",
-  "        'https://dl.fbaipublicfiles.com/nllb/flores200_dataset.tar.gz', tmp.name)\n",
-  "    with tarfile.open(tmp.name, 'r:gz') as tar:\n",
-  "        eng = tar.extractfile('./flores200_dataset/dev/eng_Latn.dev')\n",
-  "        zho = tar.extractfile('./flores200_dataset/dev/zho_Hans.dev')\n",
-  "        sources    = [l.decode().strip() for l in eng.readlines()][:EVAL_SIZE]\n",
-  "        references = [l.decode().strip() for l in zho.readlines()][:EVAL_SIZE]\n",
+  "with tempfile.NamedTemporaryFile(suffix=\".tar.gz\", delete=False) as tmp:\n",
+  "    urllib.request.urlretrieve(\"https://dl.fbaipublicfiles.com/nllb/flores200_dataset.tar.gz\", tmp.name)\n",
+  "    with tarfile.open(tmp.name, \"r:gz\") as tar:\n",
+  "        eng_file = tar.extractfile(\"./flores200_dataset/dev/eng_Latn.dev\")\n",
+  "        zho_file = tar.extractfile(\"./flores200_dataset/dev/zho_Hans.dev\")\n",
+  "        \n",
+  "        sources = [line.decode(\"utf-8\").strip() for line in eng_file.readlines()][:samples_to_eval]\n",
+  "        references = [line.decode(\"utf-8\").strip() for line in zho_file.readlines()][:samples_to_eval]\n",
+  "\n",
   "os.remove(tmp.name)\n",
-  "\n",
   "predictions = []\n",
-  "print(f'Translating {EVAL_SIZE} sentences...')\n",
   "\n",
-  "for src in tqdm(sources, desc='Translating'):\n",
-  "    prompt = f'Translate from English to Simplified Chinese:\\nen: {src}\\nzh:'\n",
-  "    enc = tokenizer(prompt, return_tensors='pt').to(model.device)\n",
+  "print(f\"Generating translations for {samples_to_eval} samples...\")\n",
+  "for i, src_text in enumerate(tqdm(sources, desc=\"Translating\")):\n",
+  "    prompt_eval = (\n",
+  "        f\"Translate from English to Simplified Chinese:\\n\"\n",
+  "        f\"en: {src_text}\\n\"\n",
+  "        f\"zh:\"\n",
+  "    )\n",
+  "    inputs_eval = tokenizer(prompt_eval, return_tensors=\"pt\").to(model.device)\n",
+  "    \n",
   "    with torch.no_grad():\n",
-  "        out = model.generate(\n",
-  "            **enc, max_new_tokens=150,\n",
-  "            pad_token_id=tokenizer.eos_token_id, do_sample=False)\n",
-  "    n_new = out.shape[1] - enc.input_ids.shape[1]\n",
-  "    pred = tokenizer.decode(out[0][-n_new:], skip_special_tokens=True).strip().replace('\\n', ' ')\n",
+  "        outputs_eval = model.generate(\n",
+  "            **inputs_eval, \n",
+  "            max_new_tokens=150, \n",
+  "            pad_token_id=tokenizer.eos_token_id,\n",
+  "            do_sample=False\n",
+  "        )\n",
+  "        \n",
+  "    num_gen = outputs_eval.shape[1] - inputs_eval.input_ids.shape[1]\n",
+  "    pred = tokenizer.decode(outputs_eval[0][-num_gen:], skip_special_tokens=True).strip().replace('\\n', ' ')\n",
   "    predictions.append(pred)\n",
   "\n",
-  "data = [{'src': s, 'mt': m, 'ref': r}\n",
-  "        for s, m, r in zip(sources, predictions, references)]\n",
-  "with open('data_to_grade.json', 'w', encoding='utf-8') as f:\n",
+  "data = [\n",
+  "    {\"src\": src, \"mt\": mt, \"ref\": ref}\n",
+  "    for src, mt, ref in zip(sources, predictions, references)\n",
+  "]\n",
+  "with open(\"data_to_grade.json\", \"w\", encoding=\"utf-8\") as f:\n",
   "    json.dump(data, f)\n",
-  "print('✅ Translations saved.')"
+  "print(\"✅ Translations complete. Saved to data_to_grade.json.\")"
  ]
 })
 
-# ── CELL 6: Install COMET ─────────────────────────────────────────────────────
 cells.append({
  "cell_type": "code",
  "execution_count": None,
  "metadata": {},
  "outputs": [],
  "source": [
-  "# 6. Install COMET dependencies\n",
-  "# (Done at the end to prevent dependency clashes with the translation loop)\n",
-  "!pip install -q unbabel-comet pytorch-lightning \"transformers<4.45\""
- ]
-})
-
-# ── CELL 7: Run COMET & BLEU Metrics ──────────────────────────────────────────
-cells.append({
- "cell_type": "code",
- "execution_count": None,
- "metadata": {},
- "outputs": [],
- "source": [
-  "# 7. Run metrics via isolated script\n",
-  "metrics_script = '''\n",
-  "import json, logging\n",
-  "logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)\n",
-  "from comet import download_model, load_from_checkpoint\n",
-  "import evaluate\n",
+  "print(\"Creating pure Python script to bypass Kaggle CLI argparse errors...\")\n",
   "\n",
-  "with open('data_to_grade.json', encoding='utf-8') as f:\n",
+  "isolated_script = \"\"\"\n",
+  "import json\n",
+  "import logging\n",
+  "logging.getLogger(\"pytorch_lightning\").setLevel(logging.WARNING)\n",
+  "\n",
+  "from comet import download_model, load_from_checkpoint\n",
+  "\n",
+  "print(\"Downloading COMET model quietly...\")\n",
+  "model_path = download_model(\"Unbabel/wmt22-comet-da\")\n",
+  "comet_model = load_from_checkpoint(model_path)\n",
+  "\n",
+  "with open(\"data_to_grade.json\", \"r\", encoding=\"utf-8\") as f:\n",
   "    data = json.load(f)\n",
   "\n",
-  "print('Scoring with COMET...')\n",
-  "comet_model = load_from_checkpoint(download_model('Unbabel/wmt22-comet-da'))\n",
-  "res = comet_model.predict(data, batch_size=8, gpus=1)\n",
-  "print('='*40)\n",
-  "print(f'COMET : {res.system_score:.4f}')\n",
+  "print(\"Scoring translations...\")\n",
+  "comet_results = comet_model.predict(data, batch_size=8, gpus=1)\n",
   "\n",
-  "preds = [d['mt'] for d in data]\n",
-  "refs  = [[d['ref']] for d in data]\n",
-  "bleu  = evaluate.load('sacrebleu').compute(predictions=preds, references=refs)\n",
-  "chrf  = evaluate.load('chrf').compute(predictions=preds, references=refs)\n",
-  "print(f'BLEU  : {bleu[\"score\"]:.2f}')\n",
-  "print(f'chrF  : {chrf[\"score\"]:.2f}')\n",
-  "print('='*40)\n",
-  "'''\n",
+  "print(\"=\"*40)\n",
+  "print(f\"🌟 Final COMET Score ({len(data)} Samples): {comet_results.system_score:.4f}\")\n",
+  "print(\"=\"*40)\n",
+  "\"\"\"\n",
   "\n",
-  "with open('run_metrics.py', 'w') as f:\n",
-  "    f.write(metrics_script)\n",
-  "\n",
-  "!python run_metrics.py"
+  "with open(\"run_comet.py\", \"w\", encoding=\"utf-8\") as f:\n",
+  "    f.write(isolated_script)\n",
+  "    \n",
+  "!python run_comet.py"
  ]
 })
 
@@ -197,6 +179,6 @@ notebook = {
  "nbformat_minor": 5,
 }
 
-with open("C:/Users/Anish/OneDrive/Desktop/modelcompression/model-compression/fisher_eval_only.ipynb", "w", encoding="utf-8") as f:
+with open("evaluate_finetuned_model.ipynb", "w", encoding="utf-8") as f:
     json.dump(notebook, f, indent=1)
-print("Evaluation notebook created successfully.")
+print("Evaluation notebook evaluate_finetuned_model.ipynb created successfully.")

@@ -1,0 +1,62 @@
+from trl import SFTConfig, SFTTrainer
+import torch
+
+
+# Emptying CUDA cache just in case previous cells left garbage
+torch.cuda.empty_cache()
+
+# Provide ALL training, packing, and data arguments directly to SFTConfig.
+sft_config = SFTConfig(
+    output_dir=output_dir,
+    per_device_train_batch_size=1,      # Drop to 1 (Essential for Kaggle Dual T4 limits)
+    gradient_accumulation_steps=16,     # Increase to 16 to keep same batch behavior
+    gradient_checkpointing=True,
+    
+    # 📉 MEMORY FIX: Added custom checkpointing kwargs specifically for reducing activation memory
+    gradient_checkpointing_kwargs={'use_reentrant': False}, 
+    
+    optim="paged_adamw_8bit", # 📉 MEMORY FIX: 8-bit optimizer
+    save_steps=25,             # ⚡ CHANGED: Save every ~10-15 minutes
+    save_total_limit=10,       # ⚡ CHANGED: Keep up to 10 checkpoints
+    logging_steps=50,
+    learning_rate=2e-4,
+    fp16=False, # 📉 MEMORY FIX: Disabled to completely bypass GradScaler BFloat16 bug,                  
+    num_train_epochs=1,             
+    warmup_steps=0.03,            
+    group_by_length=False,       # ⚡ CHANGED: Must be false when packing is true
+    lr_scheduler_type="cosine",
+    push_to_hub=True,          # ⚡ CHANGED: Push checkpoints directly to Hub
+    hub_model_id=hub_model_id,
+    hub_strategy="checkpoint",
+    hub_token=write_token,
+    report_to="none",
+    
+    dataset_text_field="text",
+    packing=True,              # ⚡ CHANGED: Pack short sentences together to save time!
+    max_length=512, # 📉 MEMORY FIX: Hard cap at 512 tokens
+)
+
+trainer = SFTTrainer(
+    model=model,
+    train_dataset=train_dataset, 
+    processing_class=tokenizer,
+    args=sft_config,
+)
+
+# --- RESUME LOGIC ---
+last_checkpoint = None
+if os.path.isdir(output_dir):
+    from transformers.trainer_utils import get_last_checkpoint
+    last_checkpoint = get_last_checkpoint(output_dir)
+
+print("\n" + "="*40)
+if last_checkpoint is not None:
+    print(f"🚀 CHECKPOINT FOUND! Resuming training from: {last_checkpoint}")
+    trainer.train(resume_from_checkpoint=last_checkpoint)
+else:
+    print("🌟 No previous checkpoint found. Starting fresh from step 0.")
+    trainer.train()
+
+# Final Save
+trainer.model.save_pretrained(output_dir)
+print(f"🎉 Training complete! Model saved perfectly to: {output_dir}")
