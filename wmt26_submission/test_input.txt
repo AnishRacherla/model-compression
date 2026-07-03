@@ -1,0 +1,3 @@
+The quick brown fox jumps over the lazy dog.
+I love studying machine learning and artificial intelligence.
+Budapest is a beautiful city in Hungary.
